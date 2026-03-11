@@ -1,0 +1,24 @@
+# Backend .NET
+backend/**/bin/
+backend/**/obj/
+backend/**/.vs/
+backend/**/*.user
+*.suo
+*.cache
+
+# Mobile (complemento a mobile/pet-assistant-mobile/.gitignore)
+mobile/pet-assistant-mobile/node_modules/
+mobile/pet-assistant-mobile/.expo/
+mobile/pet-assistant-mobile/dist/
+mobile/pet-assistant-mobile/.env
+mobile/pet-assistant-mobile/.env.local
+
+# IDE / OS
+.DS_Store
+*.swp
+*.swo
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
