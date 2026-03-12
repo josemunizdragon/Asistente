@@ -1,5 +1,5 @@
 import React, { useEffect, useState, Suspense } from 'react';
-import { View, Text, StyleSheet, ScrollView } from 'react-native';
+import { View, Text, StyleSheet } from 'react-native';
 import Constants from 'expo-constants';
 import { Asset } from 'expo-asset';
 import { colors } from '../theme/colors';
@@ -9,9 +9,27 @@ import { getDefaultAvatar } from '../data/avatarCatalog';
 
 const AVATAR_MODULE = require('../../assets/models/avatar.glb');
 
-// Lazy: solo se carga en development build; en Expo Go no se importa react-native-filament
-const AvatarFilamentScene = React.lazy(() =>
-  import('./AvatarFilamentScene').then((m) => ({ default: m.AvatarFilamentScene }))
+// Fallback cuando el lazy resuelve a undefined (p. ej. import falla por Worklets).
+function FilamentUnavailableFallback() {
+  return (
+    <View style={styles.fallbackBox}>
+      <Text style={styles.fallbackTitle}>Render nativo no disponible</Text>
+      <Text style={styles.fallbackText}>
+        Falta integración nativa de Worklets o el módulo no cargó. Reconstruye con: npx expo run:ios
+      </Text>
+    </View>
+  );
+}
+
+// Lazy con resolución segura: NUNCA pasar undefined a React.lazy (evita "Element type is invalid").
+const AvatarFilamentSceneLazy = React.lazy(() =>
+  import('./AvatarFilamentScene')
+    .then((m) => {
+      const Component = m?.AvatarFilamentScene;
+      if (typeof Component === 'function') return { default: Component };
+      return { default: FilamentUnavailableFallback };
+    })
+    .catch(() => ({ default: FilamentUnavailableFallback }))
 );
 
 type AssetStatus = 'loading' | 'found' | 'error';
@@ -48,52 +66,44 @@ export function AvatarViewer() {
     return () => { cancelled = true; };
   }, []);
 
+  // UI limpia: no mostrar "Modo seguro", "GLB listo", ni letrero "Avatar" (estado se mantiene internamente).
   return (
-    <ScrollView style={styles.container} contentContainerStyle={styles.contentContainer}>
-      {/* ——— Modo seguro: validación del asset (siempre visible) ——— */}
-      <View style={styles.safeBlock}>
-        <Text style={styles.title}>Modo seguro — Verificación de asset</Text>
-        {status === 'loading' && (
-          <Text style={styles.status}>Comprobando asset…</Text>
-        )}
-        {status === 'found' && (
-          <>
-            <Text style={styles.success}>Archivo GLB detectado</Text>
-            <Text style={styles.success}>URI local resuelta</Text>
-            <Text style={styles.uri} numberOfLines={2}>{localUri ?? ''}</Text>
-          </>
-        )}
-        {status === 'error' && (
-          <>
-            <Text style={styles.errorLabel}>Error</Text>
-            <Text style={styles.errorMessage}>{errorMessage}</Text>
-          </>
-        )}
-      </View>
-
-      {/* ——— Render nativo con Filament (solo en development build; no en Expo Go) ——— */}
+    <View style={styles.container}>
       {status === 'found' && !isExpoGo && (
         <View style={styles.filamentBlock}>
-          <Text style={styles.experimentalTitle}>Render nativo (react-native-filament)</Text>
-          <SceneErrorBoundary>
-            <Suspense fallback={<Text style={styles.hint}>Cargando escena…</Text>}>
-              <AvatarFilamentScene source={getDefaultAvatar().file} />
+          <SceneErrorBoundary
+            fallback={
+              <View style={styles.fallbackBox}>
+                <Text style={styles.fallbackTitle}>Render nativo no disponible</Text>
+                <Text style={styles.fallbackText}>
+                  Falta integración nativa de Worklets. Reconstruye con: npx expo run:ios
+                </Text>
+              </View>
+            }
+          >
+            <Suspense fallback={<View style={styles.filamentBlock} />}>
+              <AvatarFilamentSceneLazy source={getDefaultAvatar().file} />
             </Suspense>
           </SceneErrorBoundary>
         </View>
       )}
 
-      {/* ——— Fallback: Expo Go o cuando Filament no está disponible ——— */}
       {status === 'found' && isExpoGo && (
         <View style={styles.experimentalBlock}>
-          <Text style={styles.experimentalTitle}>Modo Expo Go — Sin render 3D nativo</Text>
-          <Text style={styles.hint}>Usa development build (npx expo run:ios) para ver el modelo con Filament.</Text>
           <SceneErrorBoundary>
             <AvatarNativeScene />
           </SceneErrorBoundary>
         </View>
       )}
-    </ScrollView>
+
+      {status === 'loading' && <View style={styles.filamentBlock} />}
+      {status === 'error' && (
+        <View style={styles.fallbackBox}>
+          <Text style={styles.fallbackTitle}>Error</Text>
+          <Text style={styles.fallbackText}>{errorMessage}</Text>
+        </View>
+      )}
+    </View>
   );
 }
 
@@ -102,71 +112,34 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: colors.surface,
   },
-  contentContainer: {
-    padding: 16,
-    paddingBottom: 32,
-  },
-  safeBlock: {
-    padding: 20,
-    marginBottom: 16,
-    borderWidth: 1,
-    borderStyle: 'dashed',
-    borderColor: colors.border,
-    borderRadius: 12,
-  },
-  title: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: colors.text,
-    marginBottom: 12,
-  },
-  status: {
-    fontSize: 14,
-    color: colors.textSecondary,
-  },
-  success: {
-    fontSize: 14,
-    color: colors.success,
-    fontWeight: '600',
-    marginBottom: 6,
-  },
-  uri: {
-    fontSize: 11,
-    color: colors.textSecondary,
-    marginTop: 6,
-  },
-  errorLabel: {
-    fontSize: 14,
-    color: colors.error,
-    fontWeight: '600',
-    marginBottom: 6,
-  },
-  errorMessage: {
-    fontSize: 13,
-    color: colors.textSecondary,
-  },
   filamentBlock: {
-    padding: 16,
-    marginBottom: 16,
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: 12,
+    flex: 1,
+    minHeight: 280,
+    padding: 0,
   },
   experimentalBlock: {
+    flex: 1,
+    minHeight: 280,
+  },
+  fallbackBox: {
+    flex: 1,
+    justifyContent: 'center',
     padding: 16,
+    margin: 8,
     borderWidth: 1,
     borderColor: colors.border,
-    borderRadius: 12,
+    borderRadius: 8,
+    backgroundColor: colors.surface,
   },
-  experimentalTitle: {
+  fallbackTitle: {
     fontSize: 14,
     fontWeight: '600',
     color: colors.text,
     marginBottom: 8,
   },
-  hint: {
+  fallbackText: {
     fontSize: 12,
     color: colors.textSecondary,
-    marginBottom: 12,
+    lineHeight: 18,
   },
 });
