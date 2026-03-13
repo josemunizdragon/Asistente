@@ -34,7 +34,9 @@ const AvatarFilamentSceneLazy = React.lazy(() =>
 
 type AssetStatus = 'loading' | 'found' | 'error';
 
-export function AvatarViewer() {
+export type AvatarViewerProps = { suggestedAnimation?: string };
+
+export function AvatarViewer({ suggestedAnimation }: AvatarViewerProps = {}) {
   const [status, setStatus] = useState<AssetStatus>('loading');
   const [localUri, setLocalUri] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -82,7 +84,7 @@ export function AvatarViewer() {
             }
           >
             <Suspense fallback={<View style={styles.filamentBlock} />}>
-              <AvatarFilamentSceneLazy source={getDefaultAvatar().file} />
+              <AvatarFilamentSceneLazy source={getDefaultAvatar().file} suggestedAnimation={suggestedAnimation} />
             </Suspense>
           </SceneErrorBoundary>
         </View>
@@ -91,7 +93,7 @@ export function AvatarViewer() {
       {status === 'found' && isExpoGo && (
         <View style={styles.experimentalBlock}>
           <SceneErrorBoundary>
-            <AvatarNativeScene />
+            <AvatarNativeScene suggestedAnimation={suggestedAnimation} />
           </SceneErrorBoundary>
         </View>
       )}

@@ -185,7 +185,7 @@ function buildIndicesByState(list: AnimationItem[]): AnimationIndicesByState {
   };
 }
 
-type Props = { source: AvatarSource; style?: object };
+type Props = { source: AvatarSource; style?: object; suggestedAnimation?: string };
 
 const LOG_KEY = '[AvatarFilamentScene]';
 
@@ -214,7 +214,37 @@ function logPresetFull(
   }
 }
 
-export function AvatarFilamentScene({ source, style }: Props) {
+// Mapeo backend suggestedAnimation -> nombre de animación en el GLB (fallback: idle).
+function mapSuggestedToAnimationName(suggested: string): string {
+  const s = (suggested ?? '').toLowerCase().trim();
+  if (/idle/i.test(s)) return 'idle';
+  if (/walk/i.test(s)) return 'walk';
+  if (/jump/i.test(s)) return 'jump';
+  if (/wave/i.test(s)) return 'wave';
+  if (/yes/i.test(s)) return 'yes';
+  if (/no\b/i.test(s)) return 'no';
+  if (/thumbs/i.test(s)) return 'thumbsUp';
+  if (/celebrate/i.test(s)) return 'celebrate';
+  return 'idle';
+}
+
+function findAnimationIndexByName(list: AnimationItem[], name: string): number {
+  if (!Array.isArray(list) || list.length === 0) return -1;
+  const target = name.toLowerCase();
+  for (let i = 0; i < list.length; i++) {
+    const a = list[i];
+    const animName = (a != null && typeof (a as { name?: string }).name === 'string')
+      ? (a as { name: string }).name
+      : '';
+    if (animName.toLowerCase().includes(target) || target.includes(animName.toLowerCase())) {
+      const idx = typeof (a as { index?: number }).index === 'number' ? (a as { index: number }).index : i;
+      return idx >= 0 ? idx : i;
+    }
+  }
+  return -1;
+}
+
+export function AvatarFilamentScene({ source, style, suggestedAnimation }: Props) {
   const isMounted = useRef(true);
   const presetLogRef = useRef<string | null>(null);
   const autoDiagIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -294,6 +324,37 @@ export function AvatarFilamentScene({ source, style }: Props) {
       console.warn(LOG_KEY, 'setAnimationByIndex', e);
     }
   }, [availableAnimations.length]);
+
+  // Aplicar suggestedAnimation del backend (chat): mapear nombre -> índice; fallback idle.
+  useEffect(() => {
+    if (!ENABLE_AVATAR_ANIMATION || !suggestedAnimation || availableAnimations.length === 0) return;
+    try {
+      const name = mapSuggestedToAnimationName(suggestedAnimation);
+      const idx = findAnimationIndexByName(availableAnimations, name);
+      if (idx >= 0) {
+        const anim = availableAnimations.find((a, i) => {
+          const ai = (a as { index?: number }).index;
+          return (typeof ai === 'number' ? ai : i) === idx;
+        }) ?? availableAnimations[0];
+        const label = (anim != null && typeof (anim as { name?: string }).name === 'string')
+          ? (anim as { name: string }).name
+          : name;
+        setSelectedAnimationIndex(idx);
+        setSelectedAnimationName(label);
+      } else {
+        const idleIdx = indicesByState.idle ?? 0;
+        if (idleIdx >= 0 && idleIdx < availableAnimations.length) {
+          setSelectedAnimationIndex(idleIdx);
+          setSelectedAnimationName(availableAnimations[idleIdx] != null && typeof (availableAnimations[idleIdx] as { name?: string }).name === 'string'
+            ? (availableAnimations[idleIdx] as { name: string }).name
+            : 'idle');
+        }
+        console.warn(LOG_KEY, 'suggestedAnimation not found, using idle', suggestedAnimation, name);
+      }
+    } catch (e) {
+      console.warn(LOG_KEY, 'suggestedAnimation effect', e);
+    }
+  }, [suggestedAnimation, availableAnimations, indicesByState.idle]);
 
   const setPresetSafe = useCallback((preset: LightPresetName) => {
     try {
