@@ -29,7 +29,14 @@
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
-      "expo-asset"
+      "expo-asset",
+      [
+        "@react-native-voice/voice",
+        {
+          "microphone": "La app usa el micrófono para convertir tu voz en texto en el chat.",
+          "speechRecognition": "La app usa el reconocimiento de voz para escribir mensajes con la voz."
+        }
+      ]
     ]
   }
 }
