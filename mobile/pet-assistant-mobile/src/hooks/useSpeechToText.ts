@@ -31,6 +31,7 @@ export function useSpeechToText() {
   const sessionIdRef = useRef(0);
   const activeSessionIdRef = useRef(0);
   const lastFinalProcessedInSessionRef = useRef<string>('');
+  const speechEndCallbackRef = useRef<(() => void) | null>(null);
 
   const safeSetListening = useCallback((v: boolean) => {
     if (isMounted.current) setIsListening(v);
@@ -155,6 +156,11 @@ export function useSpeechToText() {
       statusRef.current = 'idle';
       safeSetListening(false);
       safeSetStatus('idle');
+      try {
+        speechEndCallbackRef.current?.();
+      } catch (e) {
+        console.warn(LOG, 'speechEnd callback error', e);
+      }
     };
 
     Voice!.onSpeechError = (e: { error?: { code?: string; message?: string } }) => {
@@ -329,6 +335,10 @@ export function useSpeechToText() {
     setStatus('idle');
   }, []);
 
+  const setSpeechEndCallback = useCallback((callback: (() => void) | null) => {
+    speechEndCallbackRef.current = callback;
+  }, []);
+
   return {
     startListening,
     stopListening,
@@ -336,6 +346,7 @@ export function useSpeechToText() {
     destroyRecognition,
     resetSpeechState,
     forceCloseSession,
+    setSpeechEndCallback,
     clearFinalText,
     isListening,
     partialText,

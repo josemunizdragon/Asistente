@@ -1,5 +1,4 @@
 using System.Net.Http.Json;
-using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Options;
 using PetAssistant.Api.DTOs;
@@ -11,6 +10,8 @@ namespace PetAssistant.Api.Services;
 /// <summary>Implementación de OpenAI con fallback y modo mock. Try/catch en todos los puntos sensibles.</summary>
 public class OpenAiService : IOpenAiService
 {
+    private const string LogPrefix = "[OpenAI]";
+
     private readonly HttpClient _httpClient;
     private readonly OpenAiOptions _openAi;
     private readonly AssistantOptions _assistant;
@@ -22,18 +23,27 @@ public class OpenAiService : IOpenAiService
         _openAi = openAi.Value;
         _assistant = assistant.Value;
         _httpClient.Timeout = TimeSpan.FromSeconds(30);
+        var keyLen = _openAi?.ApiKey?.Length ?? 0;
+        Console.WriteLine($"{LogPrefix} ApiKey configured: {keyLen > 0} (length: {keyLen})");
     }
 
     public async Task<string> GetAssistantReplyAsync(string systemPrompt, string userMessage, List<ConversationMessage> shortMemory, CancellationToken ct = default)
     {
         if (_assistant.UseMockOpenAI)
-            return GetMockReply(userMessage);
+        {
+            var mockReply = GetMockReply(userMessage);
+            Console.WriteLine($"{LogPrefix} reply source: mock");
+            return mockReply;
+        }
+
+        if (string.IsNullOrWhiteSpace(_openAi.ApiKey))
+        {
+            Console.WriteLine($"{LogPrefix} reply source: fallback (ApiKey empty)");
+            return GetFallbackReply();
+        }
 
         try
         {
-            if (string.IsNullOrWhiteSpace(_openAi.ApiKey))
-                return GetFallbackReply();
-
             var messages = new List<object>
             {
                 new { role = "system", content = systemPrompt }
@@ -47,34 +57,101 @@ public class OpenAiService : IOpenAiService
             {
                 Content = JsonContent.Create(payload, options: JsonOptions)
             };
-            req.Headers.Add("Authorization", "Bearer " + _openAi.ApiKey);
-
-            var response = await _httpClient.SendAsync(req, ct);
-            if (!response.IsSuccessStatusCode)
+            if (!req.Headers.TryAddWithoutValidation("Authorization", "Bearer " + _openAi.ApiKey.Trim()))
+            {
+                Console.WriteLine($"{LogPrefix} reply source: fallback (failed to set Authorization header)");
                 return GetFallbackReply();
+            }
 
-            var json = await response.Content.ReadAsStringAsync(ct);
-            var doc = JsonDocument.Parse(json);
-            var choice = doc.RootElement.GetProperty("choices")[0];
-            var content = choice.GetProperty("message").GetProperty("content").GetString();
-            return string.IsNullOrWhiteSpace(content) ? GetFallbackReply() : content.Trim();
+            HttpResponseMessage response;
+            try
+            {
+                response = await _httpClient.SendAsync(req, ct);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"{LogPrefix} reply source: fallback (HTTP error: {ex.Message})");
+                return GetFallbackReply();
+            }
+
+            if (!response.IsSuccessStatusCode)
+            {
+                var errBody = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+                Console.WriteLine($"{LogPrefix} reply source: fallback (HTTP {(int)response.StatusCode}) {errBody?.Length ?? 0} chars");
+                if (!string.IsNullOrWhiteSpace(errBody) && errBody.Length < 500)
+                    Console.WriteLine($"{LogPrefix} OpenAI error body: {errBody}");
+                return GetFallbackReply();
+            }
+
+            string json;
+            try
+            {
+                json = await response.Content.ReadAsStringAsync(ct);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"{LogPrefix} reply source: fallback (read body: {ex.Message})");
+                return GetFallbackReply();
+            }
+
+            string? content;
+            try
+            {
+                using var doc = JsonDocument.Parse(json);
+                var root = doc.RootElement;
+                if (!root.TryGetProperty("choices", out var choices) || choices.GetArrayLength() == 0)
+                {
+                    Console.WriteLine($"{LogPrefix} reply source: fallback (no choices in response)");
+                    return GetFallbackReply();
+                }
+                var choice = choices[0];
+                if (!choice.TryGetProperty("message", out var message) || !message.TryGetProperty("content", out var contentEl))
+                {
+                    Console.WriteLine($"{LogPrefix} reply source: fallback (message/content missing)");
+                    return GetFallbackReply();
+                }
+                content = contentEl.GetString();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"{LogPrefix} reply source: fallback (parse error: {ex.Message})");
+                return GetFallbackReply();
+            }
+
+            if (string.IsNullOrWhiteSpace(content))
+            {
+                Console.WriteLine($"{LogPrefix} reply source: fallback (empty content)");
+                return GetFallbackReply();
+            }
+
+            Console.WriteLine($"{LogPrefix} reply source: openai");
+            return content.Trim();
         }
-        catch (Exception)
+        catch (Exception ex)
         {
+            Console.WriteLine($"{LogPrefix} reply source: fallback (exception: {ex.Message})");
             return GetFallbackReply();
         }
     }
 
     public async Task<MemoryExtractResult> ExtractMemoryAsync(Guid userId, string userMessage, string assistantReply, CancellationToken ct = default)
     {
+        var empty = new MemoryExtractResult { HasMemoryToSave = false, Items = new List<UserMemoryItem>() };
+
         if (_assistant.UseMockOpenAI)
-            return await Task.FromResult(new MemoryExtractResult { HasMemoryToSave = false, Items = new List<UserMemoryItem>() });
+        {
+            Console.WriteLine($"{LogPrefix} memory source: mock (skipped)");
+            return await Task.FromResult(empty);
+        }
+
+        if (string.IsNullOrWhiteSpace(_openAi.ApiKey))
+        {
+            Console.WriteLine($"{LogPrefix} memory source: fallback (ApiKey empty)");
+            return empty;
+        }
 
         try
         {
-            if (string.IsNullOrWhiteSpace(_openAi.ApiKey))
-                return new MemoryExtractResult { HasMemoryToSave = false, Items = new List<UserMemoryItem>() };
-
             var system = "Extrae de la conversación datos personales del usuario que valga la pena recordar: preferencias, fechas importantes, nombres, relaciones. Devuelve JSON con array 'items': cada uno { category, key, value, importance (0-1) }. Si no hay nada que guardar, devuelve { \"items\": [] }.";
             var content = $"Usuario: {userMessage}\nAsistente: {assistantReply}";
             var messages = new[] { new { role = "system", content = system }, new { role = "user", content = content } };
@@ -83,48 +160,106 @@ public class OpenAiService : IOpenAiService
             {
                 Content = JsonContent.Create(payload, options: JsonOptions)
             };
-            req.Headers.Add("Authorization", "Bearer " + _openAi.ApiKey);
+            if (!req.Headers.TryAddWithoutValidation("Authorization", "Bearer " + _openAi.ApiKey.Trim()))
+            {
+                Console.WriteLine($"{LogPrefix} memory source: fallback (failed to set Authorization header)");
+                return empty;
+            }
 
-            var response = await _httpClient.SendAsync(req, ct);
+            HttpResponseMessage response;
+            try
+            {
+                response = await _httpClient.SendAsync(req, ct);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"{LogPrefix} memory source: fallback (HTTP error: {ex.Message})");
+                return empty;
+            }
+
             if (!response.IsSuccessStatusCode)
-                return new MemoryExtractResult { HasMemoryToSave = false, Items = new List<UserMemoryItem>() };
+            {
+                Console.WriteLine($"{LogPrefix} memory source: fallback (HTTP {(int)response.StatusCode})");
+                return empty;
+            }
 
-            var json = await response.Content.ReadAsStringAsync(ct);
-            using var doc = JsonDocument.Parse(json);
-            var text = doc.RootElement.GetProperty("choices")[0].GetProperty("message").GetProperty("content").GetString();
-            if (string.IsNullOrWhiteSpace(text)) return new MemoryExtractResult { HasMemoryToSave = false, Items = new List<UserMemoryItem>() };
+            string json;
+            try
+            {
+                json = await response.Content.ReadAsStringAsync(ct);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"{LogPrefix} memory source: fallback (read body: {ex.Message})");
+                return empty;
+            }
+
+            string? text;
+            try
+            {
+                using var doc = JsonDocument.Parse(json);
+                var root = doc.RootElement;
+                if (!root.TryGetProperty("choices", out var choices) || choices.GetArrayLength() == 0)
+                {
+                    Console.WriteLine($"{LogPrefix} memory source: fallback (no choices)");
+                    return empty;
+                }
+                text = choices[0].GetProperty("message").GetProperty("content").GetString();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"{LogPrefix} memory source: fallback (parse error: {ex.Message})");
+                return empty;
+            }
+
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                Console.WriteLine($"{LogPrefix} memory source: openai (empty items)");
+                return empty;
+            }
 
             var items = new List<UserMemoryItem>();
             var start = text.IndexOf('[');
             if (start >= 0)
             {
-                var end = text.LastIndexOf(']') + 1;
-                if (end > start)
+                try
                 {
-                    var jsonArray = text.Substring(start, end - start);
-                    using var docArr = JsonDocument.Parse(jsonArray);
-                    var arr = docArr.RootElement;
-                    foreach (var e in arr.EnumerateArray())
+                    var end = text.LastIndexOf(']') + 1;
+                    if (end > start)
                     {
-                        items.Add(new UserMemoryItem
+                        var jsonArray = text.Substring(start, end - start);
+                        using var docArr = JsonDocument.Parse(jsonArray);
+                        var arr = docArr.RootElement;
+                        foreach (var e in arr.EnumerateArray())
                         {
-                            Id = Guid.NewGuid(),
-                            UserId = userId,
-                            Category = e.TryGetProperty("category", out var c) ? c.GetString() ?? "preference" : "preference",
-                            Key = e.TryGetProperty("key", out var k) ? k.GetString() ?? "" : "",
-                            Value = e.TryGetProperty("value", out var v) ? v.GetString() ?? "" : "",
-                            Importance = e.TryGetProperty("importance", out var i) ? i.GetDouble() : 0.5,
-                            CreatedAtUtc = DateTime.UtcNow,
-                            UpdatedAtUtc = DateTime.UtcNow
-                        });
+                            items.Add(new UserMemoryItem
+                            {
+                                Id = Guid.NewGuid(),
+                                UserId = userId,
+                                Category = e.TryGetProperty("category", out var c) ? c.GetString() ?? "preference" : "preference",
+                                Key = e.TryGetProperty("key", out var k) ? k.GetString() ?? "" : "",
+                                Value = e.TryGetProperty("value", out var v) ? v.GetString() ?? "" : "",
+                                Importance = e.TryGetProperty("importance", out var i) ? i.GetDouble() : 0.5,
+                                CreatedAtUtc = DateTime.UtcNow,
+                                UpdatedAtUtc = DateTime.UtcNow
+                            });
+                        }
                     }
                 }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"{LogPrefix} memory source: fallback (parse items: {ex.Message})");
+                    return empty;
+                }
             }
+
+            Console.WriteLine($"{LogPrefix} memory source: openai (items: {items.Count})");
             return new MemoryExtractResult { HasMemoryToSave = items.Count > 0, Items = items };
         }
-        catch (Exception)
+        catch (Exception ex)
         {
-            return new MemoryExtractResult { HasMemoryToSave = false, Items = new List<UserMemoryItem>() };
+            Console.WriteLine($"{LogPrefix} memory source: fallback (exception: {ex.Message})");
+            return empty;
         }
     }
 

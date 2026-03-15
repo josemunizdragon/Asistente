@@ -14,7 +14,13 @@ import { AvatarViewer } from '../../components/AvatarViewer';
 import { colors } from '../../theme/colors';
 import { useAssistantChat } from '../../hooks/useAssistantChat';
 import { useSpeechToText } from '../../hooks/useSpeechToText';
+import { useTextToSpeech } from '../../hooks/useTextToSpeech';
 import { getHealthDetails } from '../../api/assistantApi';
+
+const FLOW_LOG = '[AssistantFlow]';
+const CONV_LOG = '[ConversationMode]';
+const RESTART_DELAY_MS = 400;
+const SILENCE_DEBOUNCE_MS = 1000;
 
 export function AvatarScreen() {
   const {
@@ -23,6 +29,7 @@ export function AvatarScreen() {
     error,
     lastReply,
     sendMessage,
+    sendMessageAndGetReply,
     resetSession,
     clearError,
   } = useAssistantChat();
@@ -41,18 +48,61 @@ export function AvatarScreen() {
     clearFinalText,
     resetSpeechState,
     forceCloseSession,
+    setSpeechEndCallback,
   } = stt;
 
+  const tts = useTextToSpeech();
+  const { speak, stopSpeaking, isSpeaking } = tts;
+
+  const [conversationModeEnabled, setConversationModeEnabled] = useState(false);
   const [inputText, setInputText] = useState('');
   const lastAppliedSpeechRef = useRef<string>('');
   const ignoreIncomingSpeechRef = useRef<boolean>(false);
   const sentJustNowRef = useRef<boolean>(false);
   const prevInputRef = useRef<string>('');
+  const isMountedRef = useRef(true);
+  const conversationModeRef = useRef(false);
+  const requestInFlightRef = useRef(false);
+  const autoRestartPendingRef = useRef(false);
+  const manualStopRef = useRef(false);
+  const pendingSpeechTextRef = useRef('');
+  const lastSpeechUpdateAtRef = useRef(0);
+  const autoSendTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const chatScrollRef = useRef<ScrollView>(null);
+
+  const safeScrollToEnd = useCallback((reason: string) => {
+    const ref = chatScrollRef.current;
+    if (!ref) return;
+    try {
+      requestAnimationFrame(() => {
+        try {
+          if (chatScrollRef.current) {
+            chatScrollRef.current.scrollToEnd({ animated: true });
+            console.log('[AvatarScreen] auto-scroll ->', reason);
+          }
+        } catch (e) {
+          console.warn('[AvatarScreen] scrollToEnd error', e);
+        }
+      });
+    } catch (e) {
+      console.warn('[AvatarScreen] safeScrollToEnd error', e);
+    }
+  }, []);
+
   const [health, setHealth] = useState<{
     ok: boolean;
     useMockOpenAi?: boolean;
     quickRepliesEnabled?: boolean;
   } | null>(null);
+
+  conversationModeRef.current = conversationModeEnabled;
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -76,6 +126,142 @@ export function AvatarScreen() {
     return () => { cancelled = true; };
   }, []);
 
+  const sendMessageCore = useCallback(
+    async (text: string, source: 'manual' | 'speech'): Promise<string | null> => {
+      const t = (text ?? '').trim();
+      if (!t) return null;
+      try {
+        console.log(FLOW_LOG, 'send start source=' + source);
+        const reply = await sendMessageAndGetReply(t);
+        if (reply !== null) {
+          console.log(FLOW_LOG, 'send success');
+          return reply;
+        }
+        console.log(FLOW_LOG, 'send failed');
+        return null;
+      } catch (e) {
+        console.warn(FLOW_LOG, 'send failed', e);
+        return null;
+      }
+    },
+    [sendMessageAndGetReply]
+  );
+
+  const clearAutoSendTimer = useCallback(() => {
+    if (autoSendTimerRef.current != null) {
+      clearTimeout(autoSendTimerRef.current);
+      autoSendTimerRef.current = null;
+    }
+  }, []);
+
+  const restartListeningAfterReply = useCallback(() => {
+    if (autoRestartPendingRef.current) {
+      console.log(CONV_LOG, 'restart skipped: already pending');
+      return;
+    }
+    if (isSpeaking) {
+      console.log(CONV_LOG, 'restart skipped: TTS still speaking');
+      return;
+    }
+    if (requestInFlightRef.current) {
+      console.log(CONV_LOG, 'restart skipped: request in flight');
+      return;
+    }
+    if (manualStopRef.current) {
+      console.log(CONV_LOG, 'restart skipped: manual stop');
+      return;
+    }
+    if (!conversationModeRef.current) {
+      console.log(CONV_LOG, 'restart skipped: conversation mode off');
+      return;
+    }
+    if (!isMountedRef.current) {
+      console.log(CONV_LOG, 'restart skipped: unmounted');
+      return;
+    }
+    autoRestartPendingRef.current = true;
+    setTimeout(() => {
+      autoRestartPendingRef.current = false;
+      if (!isMountedRef.current || !conversationModeRef.current || manualStopRef.current) return;
+      try {
+        console.log(CONV_LOG, 'restarting mic');
+        startListening();
+        console.log(CONV_LOG, 'mic restarted');
+      } catch (e) {
+        console.warn(CONV_LOG, 'restart startListening error', e);
+      }
+    }, RESTART_DELAY_MS);
+  }, [startListening, isSpeaking]);
+
+  const handleAutoSendFromSpeech = useCallback(
+    async (text: string) => {
+      const t = (text ?? '').trim();
+      if (!t) return;
+      if (requestInFlightRef.current) {
+        console.log(CONV_LOG, 'auto send skipped (request in flight)');
+        return;
+      }
+      try {
+        requestInFlightRef.current = true;
+        await forceCloseSession();
+        const reply = await sendMessageCore(t, 'speech');
+        if (reply && isMountedRef.current) {
+          console.log(CONV_LOG, 'backend reply received');
+          await speak(reply);
+          console.log(CONV_LOG, 'tts finished');
+        }
+        if (isMountedRef.current) setInputText('');
+      } catch (e) {
+        console.warn(CONV_LOG, 'handleAutoSendFromSpeech error', e);
+        if (isMountedRef.current) setInputText('');
+      } finally {
+        requestInFlightRef.current = false;
+        console.log(CONV_LOG, 'requestInFlight=false');
+      }
+      if (!isMountedRef.current || !conversationModeRef.current || manualStopRef.current) return;
+      restartListeningAfterReply();
+    },
+    [forceCloseSession, sendMessageCore, speak, restartListeningAfterReply]
+  );
+
+  const flushConversationSpeechAndSend = useCallback(
+    (reason: 'speech end' | 'silence timeout') => {
+      try {
+        clearAutoSendTimer();
+        const text = pendingSpeechTextRef.current.trim();
+        pendingSpeechTextRef.current = '';
+        if (reason === 'speech end') {
+          console.log(CONV_LOG, 'speech end detected');
+        } else {
+          console.log(CONV_LOG, 'silence timeout fired');
+        }
+        if (!text) return;
+        console.log(CONV_LOG, 'auto send text:', text.slice(0, 60));
+        handleAutoSendFromSpeech(text);
+      } catch (e) {
+        console.warn(CONV_LOG, 'flushConversationSpeechAndSend error', e);
+      }
+    },
+    [clearAutoSendTimer, handleAutoSendFromSpeech]
+  );
+
+  const maybeScheduleConversationAutoSend = useCallback(
+    (text: string) => {
+      const t = (text ?? '').trim();
+      pendingSpeechTextRef.current = t;
+      lastSpeechUpdateAtRef.current = Date.now();
+      if (t) console.log(CONV_LOG, 'pending speech updated:', t.slice(0, 50));
+      clearAutoSendTimer();
+      autoSendTimerRef.current = setTimeout(() => {
+        autoSendTimerRef.current = null;
+        if (conversationModeRef.current && isMountedRef.current) {
+          flushConversationSpeechAndSend('silence timeout');
+        }
+      }, SILENCE_DEBOUNCE_MS);
+    },
+    [clearAutoSendTimer, flushConversationSpeechAndSend]
+  );
+
   const handleSend = useCallback(async () => {
     const t = inputText.trim();
     if (!t || loading) return;
@@ -86,7 +272,8 @@ export function AvatarScreen() {
     sentJustNowRef.current = true;
     console.log('[STT] message sent -> STT state cleared');
     sendMessage(t);
-  }, [inputText, loading, sendMessage, forceCloseSession]);
+    setTimeout(() => safeScrollToEnd('user message sent'), 100);
+  }, [inputText, loading, sendMessage, forceCloseSession, safeScrollToEnd]);
 
   // Al empezar a escuchar: permitir aplicar resultado de la nueva sesión; dejar de ignorar tras send.
   useEffect(() => {
@@ -109,7 +296,7 @@ export function AvatarScreen() {
     sentJustNowRef.current = false;
   }, [inputText, resetSpeechState]);
 
-  // Poner texto final de STT en el input; ignorar si ya se envió o es duplicado inmediato.
+  // Poner texto final de STT: modo conversación → buffer + debounce/onSpeechEnd; si no → solo al input.
   useEffect(() => {
     const trimmed = finalText?.trim() ?? '';
     if (!trimmed) return;
@@ -124,10 +311,48 @@ export function AvatarScreen() {
       return;
     }
     lastAppliedSpeechRef.current = trimmed;
+
+    if (
+      conversationModeRef.current &&
+      !requestInFlightRef.current &&
+      isMountedRef.current
+    ) {
+      setInputText(trimmed);
+      maybeScheduleConversationAutoSend(trimmed);
+      clearFinalText();
+      return;
+    }
+
     setInputText((prev) => (prev ? prev + ' ' + trimmed : trimmed));
     console.log('[STT] final applied to input:', trimmed.slice(0, 50));
     clearFinalText();
-  }, [finalText, clearFinalText]);
+  }, [finalText, clearFinalText, maybeScheduleConversationAutoSend]);
+
+  // En modo conversación, partialText también actualiza el buffer y reinicia el timer de silencio.
+  useEffect(() => {
+    const p = partialText?.trim() ?? '';
+    if (!conversationModeRef.current || !p || requestInFlightRef.current) return;
+    maybeScheduleConversationAutoSend(p);
+  }, [partialText, maybeScheduleConversationAutoSend]);
+
+  // Registrar callback onSpeechEnd y limpiar timer al montar/desmontar o al cambiar modo conversación.
+  useEffect(() => {
+    if (conversationModeEnabled) {
+      setSpeechEndCallback(() => {
+        if (conversationModeRef.current && isMountedRef.current && !requestInFlightRef.current) {
+          flushConversationSpeechAndSend('speech end');
+        }
+      });
+    } else {
+      setSpeechEndCallback(null);
+      clearAutoSendTimer();
+      pendingSpeechTextRef.current = '';
+    }
+    return () => {
+      setSpeechEndCallback(null);
+      clearAutoSendTimer();
+    };
+  }, [conversationModeEnabled, setSpeechEndCallback, clearAutoSendTimer, flushConversationSpeechAndSend]);
 
   const handleClearSession = useCallback(() => {
     setInputText('');
@@ -137,7 +362,28 @@ export function AvatarScreen() {
     resetSession();
   }, [resetSpeechState, resetSession]);
 
+  const handleConversationModeToggle = useCallback(() => {
+    const next = !conversationModeEnabled;
+    if (!next) {
+      manualStopRef.current = true;
+      autoRestartPendingRef.current = false;
+      clearAutoSendTimer();
+      pendingSpeechTextRef.current = '';
+      stopSpeaking().catch(() => {});
+      forceCloseSession().catch(() => {});
+      console.log(FLOW_LOG, 'conversation mode disabled -> STT/TTS stopped');
+    } else {
+      manualStopRef.current = false;
+    }
+    setConversationModeEnabled(next);
+  }, [conversationModeEnabled, stopSpeaking, forceCloseSession, clearAutoSendTimer]);
+
   const suggestedAnimation = lastReply?.suggestedAnimation ?? undefined;
+
+  useEffect(() => {
+    if (messages.length === 0) return;
+    safeScrollToEnd('messages updated');
+  }, [messages.length, messages, safeScrollToEnd]);
 
   return (
     <KeyboardAvoidingView
@@ -171,9 +417,20 @@ export function AvatarScreen() {
         </View>
       )}
 
+      {/* Modo conversación: ON/OFF */}
+      <Pressable
+        style={[styles.conversationModeBtn, conversationModeEnabled && styles.conversationModeBtnOn]}
+        onPress={handleConversationModeToggle}
+      >
+        <Text style={styles.conversationModeText}>
+          Modo conversación: {conversationModeEnabled ? 'ON' : 'OFF'}
+        </Text>
+      </Pressable>
+
       {/* Chat: historial + input */}
       <View style={styles.chatSection}>
         <ScrollView
+          ref={chatScrollRef}
           style={styles.messageList}
           contentContainerStyle={styles.messageListContent}
           keyboardShouldPersistTaps="handled"
@@ -274,9 +531,9 @@ const styles = StyleSheet.create({
     paddingTop: 8,
   },
   avatarSection: {
-    flex: 1,
-    minHeight: 240,
-    maxHeight: 320,
+    minHeight: 140,
+    maxHeight: 200,
+    height: 180,
   },
   debugRow: {
     paddingVertical: 4,
@@ -300,15 +557,34 @@ const styles = StyleSheet.create({
   healthWarn: {
     color: colors.error,
   },
+  conversationModeBtn: {
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    marginBottom: 8,
+    backgroundColor: colors.surfaceLight,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  conversationModeBtnOn: {
+    backgroundColor: colors.primary,
+    borderColor: colors.primary,
+  },
+  conversationModeText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: colors.text,
+  },
   chatSection: {
+    flex: 1,
     borderTopWidth: 1,
     borderTopColor: colors.border,
     paddingTop: 8,
     paddingBottom: 16,
-    minHeight: 160,
+    minHeight: 120,
   },
   messageList: {
-    maxHeight: 140,
+    flex: 1,
     marginBottom: 8,
   },
   messageListContent: {
