@@ -117,7 +117,8 @@ export async function sendConversationMessage(
   if (!out.ok) return { success: false, errorMessage: out.errorMessage };
   const api = out.data;
   if (api?.success && api?.data) {
-    console.log(LOG, 'sendMessage response', { replyLength: api.data.reply?.length, suggestedAnimation: api.data.suggestedAnimation });
+    const rt = api.data.replyText ?? api.data.reply;
+    console.log(LOG, 'sendMessage response', { replyTextLength: rt?.length, suggestedAnimation: api.data.suggestedAnimation });
     return { success: true, data: api.data, errorMessage: '' };
   }
   return {

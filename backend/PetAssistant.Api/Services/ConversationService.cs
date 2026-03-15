@@ -111,12 +111,15 @@ public class ConversationService : IConversationService
                     _store.AddMessage(asstMsg);
                     await _avatarState.UpdateAfterInteractionAsync(userId, request.Message, qr.Response, ct);
 
+                    var quickReplyAnimSelection = AvatarAnimationSelector.Select(request.Message, qr.SuggestedAnimation);
+                    var cleanQr = (qr.Response ?? "").Trim();
                     return new AssistantChatResponse
                     {
                         SessionId = sessionId,
-                        Reply = qr.Response,
+                        ReplyText = cleanQr,
+                        Reply = cleanQr,
                         Mood = qr.Mood ?? "calm",
-                        SuggestedAnimation = qr.SuggestedAnimation ?? "idle",
+                        SuggestedAnimation = quickReplyAnimSelection.Animation,
                         SuggestedVoiceTone = qr.SuggestedVoiceTone ?? "warm",
                         UsedQuickReply = true,
                         SavedMemory = false,
@@ -126,11 +129,15 @@ public class ConversationService : IConversationService
                 }
             }
 
-            // System prompt compuesto
+            // System prompt con contexto temporal (fecha, hora, timezone)
             var systemPrompt = BuildSystemPrompt(avatarState, longMemory);
 
             // Llamar OpenAI
-            var reply = await _openAi.GetAssistantReplyAsync(systemPrompt, request.Message, shortMemory, ct);
+            var rawReply = await _openAi.GetAssistantReplyAsync(systemPrompt, request.Message, shortMemory, ct);
+
+            // Parsear: texto limpio para usuario/TTS y metadatos separados
+            var parsed = AssistantReplyParser.Parse(rawReply);
+            var replyText = string.IsNullOrWhiteSpace(parsed.ReplyText) ? rawReply.Trim() : parsed.ReplyText;
 
             var userMessage = new ConversationMessage
             {
@@ -146,7 +153,7 @@ public class ConversationService : IConversationService
                 Id = Guid.NewGuid(),
                 SessionId = sessionId,
                 Role = "assistant",
-                Content = reply,
+                Content = replyText,
                 CreatedAtUtc = DateTime.UtcNow,
                 IsQuickReply = false
             };
@@ -156,23 +163,33 @@ public class ConversationService : IConversationService
             var memoryHints = new List<string>();
             if (request.SaveMemory && _assistant.EnableLongMemory && userId != Guid.Empty)
             {
-                var extract = await _openAi.ExtractMemoryAsync(userId, request.Message, reply, ct);
-                if (extract.HasMemoryToSave && extract.Items.Count > 0)
+                try
                 {
-                    await _memory.SaveMemoryItemsAsync(extract.Items, ct);
-                    memoryHints = extract.Items.Select(i => $"{i.Category}: {i.Key}").ToList();
+                    var extract = await _openAi.ExtractMemoryAsync(userId, request.Message, replyText, ct);
+                    if (extract.HasMemoryToSave && extract.Items.Count > 0)
+                    {
+                        await _memory.SaveMemoryItemsAsync(extract.Items, ct);
+                        memoryHints = extract.Items.Select(i => $"{i.Category}: {i.Key}").ToList();
+                    }
                 }
+                catch (Exception) { /* fallback: no memoria guardada */ }
             }
 
-            var updatedAvatar = await _avatarState.UpdateAfterInteractionAsync(userId, request.Message, reply, ct);
+            var updatedAvatar = await _avatarState.UpdateAfterInteractionAsync(userId, request.Message, replyText, ct);
+
+            var mood = parsed.Mood ?? updatedAvatar.Mood ?? "calm";
+            var tone = parsed.SuggestedVoiceTone ?? updatedAvatar.SuggestedVoiceTone ?? "warm";
+            var openAiAnimSelection = AvatarAnimationSelector.Select(request.Message, parsed.SuggestedAnimation);
+            var anim = openAiAnimSelection.Animation;
 
             return new AssistantChatResponse
             {
                 SessionId = sessionId,
-                Reply = reply,
-                Mood = updatedAvatar.Mood,
-                SuggestedAnimation = updatedAvatar.SuggestedAnimation ?? "idle",
-                SuggestedVoiceTone = updatedAvatar.SuggestedVoiceTone ?? "warm",
+                ReplyText = replyText,
+                Reply = replyText,
+                Mood = mood,
+                SuggestedAnimation = anim,
+                SuggestedVoiceTone = tone,
                 UsedQuickReply = false,
                 SavedMemory = memoryHints.Count > 0,
                 MemoryHints = memoryHints,
@@ -181,10 +198,12 @@ public class ConversationService : IConversationService
         }
         catch (Exception)
         {
+            var fallbackText = "Lo siento, algo falló. ¿Puedes intentar de nuevo?";
             return new AssistantChatResponse
             {
                 SessionId = request.SessionId ?? Guid.NewGuid(),
-                Reply = "Lo siento, algo falló. ¿Puedes intentar de nuevo?",
+                ReplyText = fallbackText,
+                Reply = fallbackText,
                 Mood = "calm",
                 SuggestedAnimation = "idle",
                 SuggestedVoiceTone = "warm",
@@ -210,21 +229,37 @@ public class ConversationService : IConversationService
 
     private string BuildSystemPrompt(AvatarState avatarState, List<UserMemoryItem> longMemory)
     {
-        var basePrompt = _assistant.SystemPrompt;
-        if (string.IsNullOrWhiteSpace(basePrompt))
-            basePrompt = "Eres un asistente virtual cálido, breve y conversacional. Responde de forma natural y concisa.";
-
-        var sb = new System.Text.StringBuilder();
-        sb.AppendLine(basePrompt);
-        sb.AppendLine($"Tu nombre es {_assistant.Name}. Responde siempre de forma breve.");
-        sb.AppendLine($"Estado actual del avatar: mood={avatarState.Mood}, energía={avatarState.Energy}. Puedes sugerir animaciones (idle, wave, celebrate) y tono de voz (warm, soft, neutral).");
-        if (longMemory.Count > 0)
+        try
         {
-            sb.AppendLine("Contexto del usuario que recuerdas:");
-            foreach (var m in longMemory.Take(15))
-                sb.AppendLine($"- {m.Category}: {m.Key} = {m.Value}");
+            var basePrompt = _assistant.SystemPrompt;
+            if (string.IsNullOrWhiteSpace(basePrompt))
+                basePrompt = "Eres un asistente virtual cálido, breve y conversacional. Responde de forma natural y concisa.";
+
+            var now = DateTime.UtcNow;
+            var tz = TimeZoneInfo.Local;
+            var localNow = TimeZoneInfo.ConvertTimeFromUtc(now, tz);
+            var currentDate = localNow.ToString("yyyy-MM-dd");
+            var currentTime = localNow.ToString("HH:mm");
+            var timezone = tz.Id;
+
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine(basePrompt);
+            sb.AppendLine($"Tu nombre es {_assistant.Name}. Responde siempre de forma breve.");
+            sb.AppendLine($"Contexto temporal actual: fecha={currentDate}, hora={currentTime}, zona horaria={timezone}. Usa este contexto si te preguntan por el día o la hora.");
+            sb.AppendLine($"Estado actual del avatar: mood={avatarState.Mood}, energía={avatarState.Energy}. No incluyas en el texto emojis ni metadatos como (tono X) o (animación X); el sistema los extrae por separado.");
+            if (longMemory.Count > 0)
+            {
+                sb.AppendLine("Contexto del usuario que recuerdas:");
+                foreach (var m in longMemory.Take(15))
+                    sb.AppendLine($"- {m.Category}: {m.Key} = {m.Value}");
+            }
+            sb.AppendLine("No des respuestas largas. Sé cercano pero conciso.");
+            return sb.ToString();
         }
-        sb.AppendLine("No des respuestas largas. Sé cercano pero conciso.");
-        return sb.ToString();
+        catch (Exception)
+        {
+            var basePrompt = _assistant.SystemPrompt ?? "Eres un asistente virtual breve y conversacional.";
+            return basePrompt + "\nResponde de forma breve y natural.";
+        }
     }
 }

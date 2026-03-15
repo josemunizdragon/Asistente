@@ -91,9 +91,10 @@ export function useAssistantChat() {
         }
 
         const d = send.data;
-        setMessages((prev) => [...prev, { role: 'assistant', text: d.reply }]);
+        const textForUser = d.replyText ?? d.reply ?? '';
+        setMessages((prev) => [...prev, { role: 'assistant', text: textForUser }]);
         setLastReply({
-          reply: d.reply,
+          reply: textForUser,
           mood: d.mood ?? 'calm',
           suggestedAnimation: d.suggestedAnimation ?? 'idle',
           suggestedVoiceTone: d.suggestedVoiceTone ?? 'warm',
@@ -159,15 +160,16 @@ export function useAssistantChat() {
         }
 
         const d = send.data;
-        setMessages((prev) => [...prev, { role: 'assistant', text: d.reply }]);
+        const textForUser = d.replyText ?? d.reply ?? '';
+        setMessages((prev) => [...prev, { role: 'assistant', text: textForUser }]);
         setLastReply({
-          reply: d.reply,
+          reply: textForUser,
           mood: d.mood ?? 'calm',
           suggestedAnimation: d.suggestedAnimation ?? 'idle',
           suggestedVoiceTone: d.suggestedVoiceTone ?? 'warm',
         });
         setLoading(false);
-        return d.reply ?? null;
+        return textForUser || null;
       } catch (e) {
         const msg = e instanceof Error ? e.message : 'Error inesperado';
         setError(msg);

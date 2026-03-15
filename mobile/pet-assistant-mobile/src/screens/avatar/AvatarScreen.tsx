@@ -16,8 +16,14 @@ import { useAssistantChat } from '../../hooks/useAssistantChat';
 import { useSpeechToText } from '../../hooks/useSpeechToText';
 import { useTextToSpeech } from '../../hooks/useTextToSpeech';
 import { getHealthDetails } from '../../api/assistantApi';
+import {
+  normalizeAvatarAnimation,
+  isTemporaryAnimation,
+  TEMPORARY_ANIMATION_MS,
+} from '../../utils/avatarAnimations';
 
 const FLOW_LOG = '[AssistantFlow]';
+const AVATAR_ACTION_LOG = '[AvatarAction]';
 const CONV_LOG = '[ConversationMode]';
 const RESTART_DELAY_MS = 400;
 const SILENCE_DEBOUNCE_MS = 1000;
@@ -69,6 +75,9 @@ export function AvatarScreen() {
   const lastSpeechUpdateAtRef = useRef(0);
   const autoSendTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const chatScrollRef = useRef<ScrollView>(null);
+  const revertToIdleTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const [effectiveAvatarAnimation, setEffectiveAvatarAnimation] = useState<string>('idle');
 
   const safeScrollToEnd = useCallback((reason: string) => {
     const ref = chatScrollRef.current;
@@ -378,7 +387,36 @@ export function AvatarScreen() {
     setConversationModeEnabled(next);
   }, [conversationModeEnabled, stopSpeaking, forceCloseSession, clearAutoSendTimer]);
 
-  const suggestedAnimation = lastReply?.suggestedAnimation ?? undefined;
+  useEffect(() => {
+    try {
+      const raw = lastReply?.suggestedAnimation ?? undefined;
+      const applied = normalizeAvatarAnimation(raw ?? '');
+      setEffectiveAvatarAnimation(applied);
+      if (revertToIdleTimeoutRef.current) {
+        clearTimeout(revertToIdleTimeoutRef.current);
+        revertToIdleTimeoutRef.current = null;
+      }
+      if (applied && applied !== 'idle' && isTemporaryAnimation(applied)) {
+        revertToIdleTimeoutRef.current = setTimeout(() => {
+          revertToIdleTimeoutRef.current = null;
+          if (isMountedRef.current) setEffectiveAvatarAnimation('idle');
+        }, TEMPORARY_ANIMATION_MS);
+      }
+      console.log(AVATAR_ACTION_LOG, 'applied animation on frontend:', applied);
+    } catch (e) {
+      console.warn(AVATAR_ACTION_LOG, 'effect error', e);
+      setEffectiveAvatarAnimation('idle');
+    }
+  }, [lastReply?.suggestedAnimation]);
+
+  useEffect(() => {
+    return () => {
+      if (revertToIdleTimeoutRef.current) {
+        clearTimeout(revertToIdleTimeoutRef.current);
+        revertToIdleTimeoutRef.current = null;
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (messages.length === 0) return;
@@ -394,7 +432,7 @@ export function AvatarScreen() {
       <Text style={styles.title}>Asistente virtual</Text>
 
       <View style={styles.avatarSection}>
-        <AvatarViewer suggestedAnimation={suggestedAnimation} />
+        <AvatarViewer suggestedAnimation={effectiveAvatarAnimation || undefined} />
       </View>
 
       {/* Debug: mood, animation, voiceTone */}

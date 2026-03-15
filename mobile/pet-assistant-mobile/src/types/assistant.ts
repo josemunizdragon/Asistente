@@ -35,10 +35,13 @@ export interface AssistantChatRequest {
 
 export interface AssistantChatResponse {
   sessionId: string;
-  reply: string;
-  mood: string;
-  suggestedAnimation: string;
-  suggestedVoiceTone: string;
+  /** Texto limpio para mostrar y TTS (sin emojis ni metadatos). Usar siempre este para usuario. */
+  replyText: string;
+  /** @deprecated Usar replyText. Se mantiene por compatibilidad. */
+  reply?: string;
+  mood: string | null;
+  suggestedAnimation: string | null;
+  suggestedVoiceTone: string | null;
   usedQuickReply: boolean;
   savedMemory: boolean;
   memoryHints: string[];

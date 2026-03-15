@@ -20,10 +20,10 @@ public class OpenAiService : IOpenAiService
     public OpenAiService(HttpClient httpClient, IOptions<OpenAiOptions> openAi, IOptions<AssistantOptions> assistant)
     {
         _httpClient = httpClient;
-        _openAi = openAi.Value;
-        _assistant = assistant.Value;
+        _openAi = openAi?.Value ?? throw new ArgumentNullException(nameof(openAi));
+        _assistant = assistant?.Value ?? throw new ArgumentNullException(nameof(assistant));
         _httpClient.Timeout = TimeSpan.FromSeconds(30);
-        var keyLen = _openAi?.ApiKey?.Length ?? 0;
+        var keyLen = _openAi.ApiKey?.Length ?? 0;
         Console.WriteLine($"{LogPrefix} ApiKey configured: {keyLen > 0} (length: {keyLen})");
     }
 

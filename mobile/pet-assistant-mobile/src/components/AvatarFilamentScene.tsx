@@ -214,7 +214,7 @@ function logPresetFull(
   }
 }
 
-// Mapeo backend suggestedAnimation -> nombre de animación en el GLB (fallback: idle).
+// Mapeo backend suggestedAnimation (lista cerrada) -> nombre de animación en el GLB (fallback: idle).
 function mapSuggestedToAnimationName(suggested: string): string {
   const s = (suggested ?? '').toLowerCase().trim();
   if (/idle/i.test(s)) return 'idle';
@@ -224,7 +224,10 @@ function mapSuggestedToAnimationName(suggested: string): string {
   if (/yes/i.test(s)) return 'yes';
   if (/no\b/i.test(s)) return 'no';
   if (/thumbs/i.test(s)) return 'thumbsUp';
-  if (/celebrate/i.test(s)) return 'celebrate';
+  if (/dance|celebrate/i.test(s)) return 'dance';
+  if (/sitting|sit/i.test(s)) return 'sitting';
+  if (/standing|stand/i.test(s)) return 'standing';
+  if (/punch/i.test(s)) return 'punch';
   return 'idle';
 }
 
@@ -325,11 +328,12 @@ export function AvatarFilamentScene({ source, style, suggestedAnimation }: Props
     }
   }, [availableAnimations.length]);
 
-  // Aplicar suggestedAnimation del backend (chat): mapear nombre -> índice; fallback idle.
+  // Aplicar suggestedAnimation del backend (chat): mapear nombre -> índice; fallback idle. Try/catch para no romper chat/TTS.
   useEffect(() => {
-    if (!ENABLE_AVATAR_ANIMATION || !suggestedAnimation || availableAnimations.length === 0) return;
+    if (!ENABLE_AVATAR_ANIMATION || availableAnimations.length === 0) return;
     try {
-      const name = mapSuggestedToAnimationName(suggestedAnimation);
+      const raw = suggestedAnimation ?? '';
+      const name = raw ? mapSuggestedToAnimationName(raw) : 'idle';
       const idx = findAnimationIndexByName(availableAnimations, name);
       if (idx >= 0) {
         const anim = availableAnimations.find((a, i) => {
@@ -353,6 +357,11 @@ export function AvatarFilamentScene({ source, style, suggestedAnimation }: Props
       }
     } catch (e) {
       console.warn(LOG_KEY, 'suggestedAnimation effect', e);
+      const idleIdx = indicesByState.idle ?? 0;
+      if (idleIdx >= 0 && idleIdx < availableAnimations.length) {
+        setSelectedAnimationIndex(idleIdx);
+        setSelectedAnimationName('idle');
+      }
     }
   }, [suggestedAnimation, availableAnimations, indicesByState.idle]);
 
