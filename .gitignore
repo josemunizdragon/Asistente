@@ -1,4 +1,5 @@
 # Backend .NET
+backend/PetAssistant.Api/appsettings.json
 backend/**/bin/
 backend/**/obj/
 backend/**/.vs/

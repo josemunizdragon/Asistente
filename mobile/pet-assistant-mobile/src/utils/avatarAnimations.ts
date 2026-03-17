@@ -16,14 +16,23 @@ export const VALID_AVATAR_ANIMATIONS = new Set([
   'punch',
 ]);
 
+/** Animaciones temporales: se aplican, se espera un tiempo, luego se vuelve a idle. */
 const TEMPORARY_ANIMATIONS = new Set([
-  'dance',
-  'jump',
   'wave',
   'yes',
   'no',
+  'dance',
+  'jump',
   'thumbsUp',
   'punch',
+]);
+
+/** Animaciones persistentes: se aplican una vez y se mantienen hasta otra animación o idle. */
+export const PERSISTENT_ANIMATIONS = new Set([
+  'idle',
+  'walking',
+  'sitting',
+  'standing',
 ]);
 
 /** Duración en ms tras la cual volver a idle para animaciones temporales. */
@@ -44,4 +53,8 @@ export function normalizeAvatarAnimation(value: string | null | undefined): stri
 
 export function isTemporaryAnimation(animation: string): boolean {
   return TEMPORARY_ANIMATIONS.has(animation.trim().toLowerCase());
+}
+
+export function isPersistentAnimation(animation: string): boolean {
+  return PERSISTENT_ANIMATIONS.has(animation.trim().toLowerCase());
 }

@@ -132,6 +132,9 @@ const AUTO_DIAG_ALL_PRESETS: LightPresetName[] = [
 const AUTO_DIAG_INTERVAL_MS = 1200;
 const BEST_VIEW_PRESET: LightPresetName = 'debug_single_light_high'; // front_neg_z + intensity high
 
+/** Poner en true para mostrar panel de debug (presets, cardinales, AutoDiag, Zoom, etc.) en la zona del avatar. */
+const SHOW_AVATAR_DEBUG_UI = false;
+
 // Cámara y encuadre — más aire, cuerpo completo, cabeza sin cortar.
 const CAMERA_NEAR = 0.05;
 const CAMERA_FAR = 100;
@@ -328,7 +331,8 @@ export function AvatarFilamentScene({ source, style, suggestedAnimation }: Props
     }
   }, [availableAnimations.length]);
 
-  // Aplicar suggestedAnimation del backend (chat): mapear nombre -> índice; fallback idle. Try/catch para no romper chat/TTS.
+  // Aplicar suggestedAnimation del backend (chat): mapear nombre -> índice; fallback idle.
+  // No re-ejecutar el mismo clip si ya está activo (evita loops/glitches en sitting, walking, etc.).
   useEffect(() => {
     if (!ENABLE_AVATAR_ANIMATION || availableAnimations.length === 0) return;
     try {
@@ -343,11 +347,15 @@ export function AvatarFilamentScene({ source, style, suggestedAnimation }: Props
         const label = (anim != null && typeof (anim as { name?: string }).name === 'string')
           ? (anim as { name: string }).name
           : name;
+        if (idx === selectedAnimationIndex && (label === selectedAnimationName || String(selectedAnimationName).toLowerCase().includes(name.toLowerCase()))) {
+          return;
+        }
         setSelectedAnimationIndex(idx);
         setSelectedAnimationName(label);
       } else {
         const idleIdx = indicesByState.idle ?? 0;
         if (idleIdx >= 0 && idleIdx < availableAnimations.length) {
+          if (idleIdx === selectedAnimationIndex) return;
           setSelectedAnimationIndex(idleIdx);
           setSelectedAnimationName(availableAnimations[idleIdx] != null && typeof (availableAnimations[idleIdx] as { name?: string }).name === 'string'
             ? (availableAnimations[idleIdx] as { name: string }).name
@@ -363,7 +371,7 @@ export function AvatarFilamentScene({ source, style, suggestedAnimation }: Props
         setSelectedAnimationName('idle');
       }
     }
-  }, [suggestedAnimation, availableAnimations, indicesByState.idle]);
+  }, [suggestedAnimation, availableAnimations, indicesByState.idle, selectedAnimationIndex, selectedAnimationName]);
 
   const setPresetSafe = useCallback((preset: LightPresetName) => {
     try {
@@ -649,7 +657,7 @@ export function AvatarFilamentScene({ source, style, suggestedAnimation }: Props
         </FilamentView>
       </FilamentScene>
 
-      {showDebugPanel && (
+      {SHOW_AVATAR_DEBUG_UI && showDebugPanel && (
         <View style={styles.diagPanel}>
           <Text style={styles.diagTitle} numberOfLines={2}>
             preset={lightPreset} | baseY={MODEL_FACING_ROTATION_Y.toFixed(2)} | {orientationLabel} | zoom={zoomFactor.toFixed(2)} | anim={selectedAnimationName || '—'}

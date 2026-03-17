@@ -251,8 +251,20 @@ public class ConversationService : IConversationService
             {
                 sb.AppendLine("Contexto del usuario que recuerdas:");
                 foreach (var m in longMemory.Take(15))
+                {
+                    if (UserNameValidation.IsNameLikeMemoryItem(m.Category, m.Key) && !UserNameValidation.IsValidUserName(m.Value))
+                        continue;
                     sb.AppendLine($"- {m.Category}: {m.Key} = {m.Value}");
+                }
             }
+            sb.AppendLine();
+            sb.AppendLine("Reglas sobre el nombre del usuario:");
+            sb.AppendLine("- No inventes ni supongas el nombre del usuario.");
+            sb.AppendLine("- No uses palabras del último mensaje del usuario como si fueran su nombre (ej. si dice «Brinca» o «Baila», son órdenes, no su nombre; responde «Claro, voy a brincar» o «Vamos a bailar», nunca «Claro, Brinca!»).");
+            sb.AppendLine("- Solo usa el nombre del usuario si está en el contexto anterior como nombre confirmado (ej. «me llamo José» / «mi nombre es X»).");
+            sb.AppendLine("- Si el mensaje es una orden o comando al avatar (brinca, baila, camina, siéntate, salta, etc.), responde como acción o reacción, no como apelativo.");
+            sb.AppendLine("- Si no conoces su nombre, usa respuestas neutrales: «Claro», «Entendido», «Vamos a ello», «Listo», «Hola, ¿cómo estás?», etc.");
+            sb.AppendLine();
             sb.AppendLine("No des respuestas largas. Sé cercano pero conciso.");
             return sb.ToString();
         }

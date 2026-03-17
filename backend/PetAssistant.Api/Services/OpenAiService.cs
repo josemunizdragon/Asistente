@@ -152,7 +152,7 @@ public class OpenAiService : IOpenAiService
 
         try
         {
-            var system = "Extrae de la conversación datos personales del usuario que valga la pena recordar: preferencias, fechas importantes, nombres, relaciones. Devuelve JSON con array 'items': cada uno { category, key, value, importance (0-1) }. Si no hay nada que guardar, devuelve { \"items\": [] }.";
+            var system = "Extrae de la conversación datos personales del usuario que valga la pena recordar: preferencias, fechas importantes, relaciones. Para el nombre del usuario solo extrae si lo indicó explícitamente (ej. «me llamo José», «mi nombre es María»). No guardes como nombre palabras que sean órdenes o comandos (brinca, baila, camina, siéntate, párate, salta, hola, adiós, sí, no). Devuelve JSON con array 'items': cada uno { category, key, value, importance (0-1) }. Si no hay nada que guardar, devuelve { \"items\": [] }.";
             var content = $"Usuario: {userMessage}\nAsistente: {assistantReply}";
             var messages = new[] { new { role = "system", content = system }, new { role = "user", content = content } };
             var payload = new { model = _openAi.Model, messages };
@@ -232,13 +232,18 @@ public class OpenAiService : IOpenAiService
                         var arr = docArr.RootElement;
                         foreach (var e in arr.EnumerateArray())
                         {
+                            var category = e.TryGetProperty("category", out var c) ? c.GetString() ?? "preference" : "preference";
+                            var key = e.TryGetProperty("key", out var k) ? k.GetString() ?? "" : "";
+                            var value = e.TryGetProperty("value", out var v) ? v.GetString() ?? "" : "";
+                            if (UserNameValidation.IsNameLikeMemoryItem(category, key) && !UserNameValidation.IsValidUserName(value))
+                                continue;
                             items.Add(new UserMemoryItem
                             {
                                 Id = Guid.NewGuid(),
                                 UserId = userId,
-                                Category = e.TryGetProperty("category", out var c) ? c.GetString() ?? "preference" : "preference",
-                                Key = e.TryGetProperty("key", out var k) ? k.GetString() ?? "" : "",
-                                Value = e.TryGetProperty("value", out var v) ? v.GetString() ?? "" : "",
+                                Category = category,
+                                Key = key,
+                                Value = value,
                                 Importance = e.TryGetProperty("importance", out var i) ? i.GetDouble() : 0.5,
                                 CreatedAtUtc = DateTime.UtcNow,
                                 UpdatedAtUtc = DateTime.UtcNow
@@ -271,6 +276,11 @@ public class OpenAiService : IOpenAiService
         if (lower.Contains("quién eres")) return "Soy Basthelo, tu asistente virtual. Me gusta ser cercano y útil.";
         if (lower.Contains("cómo estás")) return "Muy bien, gracias. ¿Y tú?";
         if (lower.Contains("triste")) return "Lamento que te sientas así. Si quieres, podemos hablar un poco.";
+        if (lower == "brinca" || lower == "salta" || lower == "jump") return "Claro, voy a brincar.";
+        if (lower == "baila" || lower == "dance") return "Vamos a bailar.";
+        if (lower == "camina" || lower == "walk") return "Entendido, camino.";
+        if (lower == "siéntate" || lower == "sientate" || lower == "sit") return "Listo, me siento.";
+        if (lower == "párate" || lower == "parate" || lower == "stand") return "Listo, me paro.";
         return "Entendido. ¿Hay algo más en lo que pueda ayudarte?";
     }
 
